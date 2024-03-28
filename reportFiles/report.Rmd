@@ -1,0 +1,825 @@
+---
+title: |
+  | \vspace{5cm} Who Will Make the Playoffs?:
+  | Predicting the 2024 NHL Standings
+author: |
+  | Peter D. DePaul III
+date: "03-15-2024" 
+abstract: "This reports presents a comprehensive analysis of hockey statistics with the goal of predicting the final National Hockey League (NHL) standings utilizing statistics from the latter part of the regular season (10-15 games left). This project meticulously examines the relationship between various team performance indicators and their standings at the end of the season. The development of the predictive model is a robust process with 6 models tested — including multivariate linear regression, support vector machines, and random forests — with the results revealing insightful variables for prediction. The findings of this model has the ability to help team management understand their season-end goal, whether it's making a playoff push or giving up and planning for next year. This offers a tool for any analyst or fan who are eagerly anticipating the playoffs."
+bibliography: references.bib
+header-includes:
+  - \usepackage[usenames,dvipsnames]{xcolor}
+  - \usepackage[table]{xcolor}
+  - \usepackage{booktabs}
+output: 
+  bookdown::pdf_document2:
+    fig_width: 12
+    toc: no
+    number_sections: true
+linkcolor: blue
+urlcolor: blue
+citecolor: blue
+link-citations: yes
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+\newpage
+
+```{=latex}
+\hypersetup{linkcolor=black}
+\setcounter{tocdepth}{4}
+\tableofcontents
+\hypersetup{linkcolor=blue}
+```
+\newpage
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, cache = TRUE)
+library(bookdown)
+library(tidyverse)
+library(tidymodels)
+library(kableExtra)
+library(ggrepel)
+library(gridExtra)
+library(stringi)
+library(patchwork)
+# load in the mid_season and end_season data files
+mid_season <- read_csv("../data/model/end_season_points/mid_season_w_preds.csv")
+end_season <- read_csv("../data/model/end_season.csv")
+```
+
+# Introduction
+
+When it comes to sports it's hard to argue that there is anything more important than the playoffs. Perhaps the only thing more important is being one of the teams that qualifies for the playoffs tournament. In the National Hockey League (NHL), the playoffs have an interesting format compared to most leagues. The final NHL playoffs spots are usually separated by 2-3 standings points, and the last 10-15 games of the season usually significantly impact the final standings. I believe there’s a way to predict the final points totals for each of the 32 NHL teams based upon their team statistics and standings with about 10-15 games left per season.
+
+## Background
+
+The NHL has a long history with the earliest version of the Stanley Cup Playoff taking place in 1917. The early NHL was tumultuous and often teams wouldn't survive a few years. The modern league is generally considered as beginning in 1942-1943 with the "Original Six" teams. Today the NHL has expanded to over 32 teams, and follows a 16 team playoff format. The 16 team playoff format has existed since the 1979-1980 season when there were 21 teams in the NHL. Today the playoffs follow a format where there are 8 teams each from the Eastern Conference and Western Conference. Within these conferences there are 2 divisions so the 3 best teams from each of these divisions qualify for the playoffs. Additionally, there are 2 "Wild Card" teams for each conference that make up the final playoff spots [@playoffHistory]. 
+
+## Variable Overview
+
+Below is the subset of variables I utilized from the larger data sets to build the model for my final points predictions. There are 14 total variables in the data set including the predicted variable `endSeasonPoints`. The 13 predictor variables were all used in the modeling process and the breakdown is 11 numeric, and 2 categorical.
+
+```{r variables, echo=FALSE}
+nineties <- unique(mid_season$seasonId)[1:5]
+two_thousands <- unique(mid_season$seasonId)[6:14]
+twenty10s <- unique(mid_season$seasonId)[15:23]
+twenty20s <- unique(mid_season$seasonId)[24:26]
+# Load in the teams stats at the "middle" of the season (around March 15th)
+mid_season <- 
+  mid_season %>% 
+  replace_na(list(clinchIndicator = "none")) %>%
+  relocate(c(team_name, seasonId), .after = clinchIndicator) %>%  
+  mutate(clinchIndicator = factor(clinchIndicator),
+         decade = factor(decade, 
+                         levels = c("1990", "2000", "2010", "2020"),
+                         labels = c("1990s", "2000s", "2010s", "2020s")
+                         )
+         )
+
+add_ind <- c("p", "z", "x", "y",
+             "y", "x", "x", "x",
+             "x", "x", "x", "x",
+             "x", "x", "x", "x",
+             rep("e", 16))
+
+preds_w_index <- 
+  tail(mid_season, n = 32) %>% 
+  arrange(desc(end_season_points)) %>%
+  mutate(clinchIndicator = add_ind, .before = team_name) %>% 
+  arrange(desc(points))
+
+
+# Load in the end season stats for 1995-1996 to 2022-2023
+end_season <-
+  end_season %>% 
+  replace_na(list(clinchIndicator = "e")) %>% 
+  relocate(c(team_name, seasonId), .after = clinchIndicator) %>%  
+  mutate(clinchIndicator = factor(clinchIndicator,
+                                  levels = c("e", "x", "y", "z", "p"),
+                                  labels = c("Eliminated", "Made Playoffs",
+                                             "Won Division", "Won Conference",
+                                             "President's Trophy")),
+         decade = factor(ifelse(seasonId %in% nineties, "1990s", 
+                                ifelse(seasonId %in% two_thousands, "2000s",
+                                       ifelse(seasonId %in% twenty10s,"2010s",
+                                              "2020s"
+                                              ) 
+                                       ) 
+                                ), 
+                         levels = c("1990s", "2000s", "2010s", "2020s") 
+                         )
+         )
+
+var_names <- 
+  mid_season %>% 
+  select(-c(teamCommonName, teamAbbrev, team_name, seasonId, placeName, 
+            streakCode, streakCount, l10GamesPlayed, goalDifferentialPctg,
+            goalsForPctg, homeGoalDifferential, homeGamesPlayed, 
+            roadGamesPlayed, regulationPlusOtWinPctg, regulationWinPctg, 
+            homePoints, roadPoints, homeGoalsAgainst, roadGoalsAgainst,
+            homeGoalsFor, roadGoalsFor, l10GoalsAgainst, l10GoalsFor,
+            roadGoalDifferential, winPctg, pointPctg, roadLosses, 
+            homeLosses, homeOtLosses, goalFor, goalAgainst, roadOtLosses),
+         -contains("wins") 
+         ) %>% 
+  colnames()
+
+var_names[13] <- c("endSeasonPoints")
+
+var_descriptions <- 
+  c("Indicating if the team clinched a playoff spot",
+    "Total Number of Games Played",
+    "Goal Differential of Team",
+    "Goal Differential over Last ten Games",
+    "Losses over Last ten Games",
+    "Overtime Losses over Last ten Games",
+    "Standings Points over Last ten Games",
+    "Losses",
+    "Losses in Overtime",
+    "Standings Points",
+    "Shootout Losses",
+    "Wildcard Ranking",
+    "Predicted Points",
+    "Decade of Play"
+    )
+
+var_type <- 
+  c("Categorical", rep("Numeric", 12), "Categorical")
+
+var_data <- tibble(Variables = var_names,
+                   Description = var_descriptions,
+                   Type = var_type)
+
+var_table <- 
+  var_data %>% 
+  kbl(caption = "Table of Variables", booktabs = TRUE,
+      format = "latex", ) %>% 
+  kable_styling(latex_options = c("HOLD_position", "striped"),
+                stripe_color = "#e6e6fa", font_size = 11) %>% 
+  row_spec(0, bold = TRUE, align = "c")
+var_table
+rm(add_ind, var_names, var_type, var_data, var_descriptions)
+```
+
+# Exploratory Data Analysis
+
+## Does Goal Differential Matter for Predicting Points?
+
+For understanding a team's points at the end of a season, it's important
+to understand how well that team did from a scoring perspective. Luckily
+in the NHL there's an all encompassing scoring statistic, "Goal
+Differential". Goal differential is defined as
+$\text{Goal Differential } = \text{Goals For} - \text{Goals Against}$.
+It's a simple metric to understand, negative usually indicates poor
+play, 0 indicates a team is playing about even on both sides of the
+puck, and a positive one indicates great play from a team [@goalDifferential].
+
+```{r lmTable}
+lm_model <- lm(end_season_points ~ goalDifferential, data = end_season)
+lm_summary <- summary(lm_model)
+lm_df <- data.frame(round(lm_summary$coefficients[, c(1, 2, 4)], 3))
+
+lm_df %>% 
+  rename(`Std. Error` = Std..Error,
+         `p-value` = Pr...t..) %>% 
+  kbl(format = "latex", booktabs = TRUE, 
+      caption = "Regression Model Coefficients") %>% 
+  kable_styling(latex_options = c("HOLD_position"), font_size = 11)
+```
+
+From the Table \@ref(tab:lmTable) above we can see that both the intercept
+(`end_season_points`) and the predictor (`goalDifferential`) have
+p-values that are 0, which indicates both are significant. This implies
+that when `goalDifferential` is equal to 0 that the `end_season_points`
+are significantly different from 0. This also implies that
+`goalDifferential` has a significant impact on the prediction of
+`end_season_points`.
+
+```{r gdPlot, fig.cap="Scatterplot of Points vs Goal Differential", fig.height=6, out.width="100%"}
+
+ggplot(
+  data = end_season %>% 
+  group_by(seasonId) %>% 
+  mutate(team_rank = as.integer(rank(-end_season_points))) %>% 
+  select(clinchIndicator, team_name, seasonId, end_season_points, team_rank,
+         goalDifferential),
+  aes(x = goalDifferential, y = end_season_points)
+  ) +
+  geom_point() +
+  geom_smooth() +
+  theme_minimal() + 
+  labs(x = "Goal Differential", y = "Points (End of Season)",
+       title = "Scatterplot of Points vs. Goal Differential") +
+  theme(axis.title = element_text(size = 14),
+        axis.text = element_text(size = 14),
+        title = element_text(face = "bold", size = 14)) +
+  annotate(geom = "text", x = -75, y = 125, 
+           label = paste0("R-Squared = ", round(lm_summary$r.squared, 2)),
+           size = 8, color = "blue")
+
+```
+
+From the fitted linear regression line we're able to see that the $R^{2} = 0.86$ indicates there is a strong positive linear relationship between Goal Differential and end of season Points [See Figure \@ref(fig:gdPlot)]. Teams with higher (more positive) goal differentials often finish higher in the league standings. With lower (more negative) team goal differentials teams more often than not historically have finished lower in the league standings [@goalDifferential].
+
+\newpage
+
+## How does Goal Differential impact the Playoffs?
+
+```{r piecharts, fig.cap="Playoff Status by Goal Differential (GD)", fig.height=6.5, out.width="100%"}
+# Goal Differential Playoff data for teams with Goal Differential greater than
+# or equal to +20
+gd_20 <-
+  end_season %>% 
+  group_by(seasonId) %>% 
+  mutate(team_rank = as.integer(rank(-end_season_points))) %>% 
+  ungroup() %>% 
+  select(clinchIndicator, team_name, seasonId, end_season_points, team_rank,
+         goalDifferential) %>% 
+  filter(goalDifferential >= 20) %>%
+  group_by(clinchIndicator) %>% 
+  summarise(freq = n()) %>% 
+  mutate(pct = freq / sum(freq)) %>% 
+  summarise(`Made Playoffs` = sum(pct[2:5]) * 100,
+            `Missed Playoffs` = pct[1] * 100) %>%
+  pivot_longer(cols = c("Made Playoffs", "Missed Playoffs"),
+                        names_to = "status",
+                        values_to = "value")
+
+gd_20_2 <- 
+  gd_20 %>% 
+  mutate(csum = rev(cumsum(rev(value))),
+         pos = value / 2 + lead(csum, 1),
+         pos = ifelse(is.na(pos), value / 2, pos))
+
+gd_ok <-
+  end_season %>% 
+  group_by(seasonId) %>% 
+  mutate(team_rank = as.integer(rank(-end_season_points))) %>% 
+  ungroup() %>% 
+  select(clinchIndicator, team_name, seasonId, end_season_points, team_rank,
+         goalDifferential) %>% 
+  filter(goalDifferential < 20 & goalDifferential > -10) %>%
+  group_by(clinchIndicator) %>% 
+  summarise(freq = n()) %>% 
+  mutate(pct = freq / sum(freq)) %>% 
+  summarise(`Made Playoffs` = sum(pct[2:4]) * 100,
+            `Missed Playoffs` = pct[1] * 100) %>%
+  pivot_longer(cols = c("Made Playoffs", "Missed Playoffs"),
+                        names_to = "status",
+                        values_to = "value")
+
+gd_ok_2 <- 
+  gd_ok %>% 
+  mutate(csum = rev(cumsum(rev(value))),
+         pos = value / 2 + lead(csum, 1),
+         pos = ifelse(is.na(pos), value / 2, pos))
+
+# Goal Differential Playoff data for teams with Goal Differential less than
+# or equal to -10
+gd_bad <- 
+  end_season %>% 
+  group_by(seasonId) %>% 
+  mutate(team_rank = as.integer(rank(-end_season_points))) %>% 
+  ungroup() %>% 
+  select(clinchIndicator, team_name, seasonId, end_season_points, team_rank,
+         goalDifferential) %>% 
+  filter(goalDifferential <= -10) %>%
+  group_by(clinchIndicator) %>% 
+  summarise(freq = n()) %>% 
+  mutate(pct = freq / sum(freq)) %>% 
+  summarise(`Made Playoffs` = sum(pct[2:3]) * 100,
+            `Missed Playoffs` = pct[1] * 100) %>%
+  pivot_longer(cols = c("Made Playoffs", "Missed Playoffs"),
+                        names_to = "status",
+                        values_to = "value")
+
+gd_bad_2 <- 
+  gd_bad %>% 
+  mutate(csum = rev(cumsum(rev(value))),
+         pos = value / 2 + lead(csum, 1),
+         pos = ifelse(is.na(pos), value / 2, pos))
+
+gd_20_plot <-   
+  ggplot(data = gd_20, 
+         aes(x = "", 
+             y = value, 
+             fill = factor(status, 
+                           levels = c("Made Playoffs","Missed Playoffs")
+                           )
+             )
+         ) +
+  geom_col(width = 1, color = 1) +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  labs(title = "Goal Differential of +20 or more") +
+  scale_fill_manual(values = c("Made Playoffs" = "#89cff0",
+                               "Missed Playoffs" = "#fe6f5e"),
+                    name = "Playoff Status")  +
+  theme(legend.title = element_text(size = 16),
+        legend.text = element_text(size = 14),
+        title = element_text(size = 16, face = "bold")) +
+  geom_label_repel(data = gd_20_2,
+                   aes(y = pos, 
+                       label = sprintf("%.2f%%", value)
+                       ), 
+                   nudge_x = 1,
+                   show.legend = FALSE,
+                   size = 8)
+
+gd_ok_plot <-   
+  ggplot(data = gd_ok, 
+         aes(x = "", 
+             y = value, 
+             fill = factor(status, 
+                           levels = c("Made Playoffs","Missed Playoffs")
+                           )
+             )
+         ) +
+  geom_col(width = 1, color = 1) +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  labs(title = "Goal Differential between -10 and +20") +
+  scale_fill_manual(values = c("Made Playoffs" = "#89cff0",
+                               "Missed Playoffs" = "#fe6f5e"),
+                    name = "Playoff Status")  +
+  theme(legend.title = element_text(size = 16),
+        legend.text = element_text(size = 14),
+        title = element_text(size = 16, face = "bold")) +
+  geom_label_repel(data = gd_ok_2,
+                   aes(y = pos, 
+                       label = sprintf("%.2f%%", value)
+                       ), 
+                   nudge_x = 1,
+                   nudge_y = -10,
+                   show.legend = FALSE,
+                   size = 8)
+
+gd_bad_plot <-   
+  ggplot(data = gd_bad, 
+         aes(x = "", 
+             y = value, 
+             fill = factor(status, 
+                           levels = c("Made Playoffs","Missed Playoffs")
+                           )
+             )
+         ) +
+  geom_col(width = 1, color = 1) +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  labs(title = "Goal Differential of -10 or less") +
+  scale_fill_manual(values = c("Made Playoffs" = "#89cff0",
+                               "Missed Playoffs" = "#fe6f5e"),
+                    name = "Playoff Status")  +
+  theme(legend.title = element_text(size = 16),
+        legend.text = element_text(size = 14),
+        title = element_text(size = 16, face = "bold", hjust = 0.5)) +
+  geom_label_repel(data = gd_bad_2,
+                   aes(y = pos, 
+                       label = sprintf("%.2f%%", value)
+                       ), 
+                   nudge_x = 1,
+                   show.legend = FALSE,
+                   size = 8)
+
+gd_bad_plot + plot_spacer() + gd_ok_plot  + plot_spacer() + gd_20_plot +
+  plot_layout(heights = unit(c(6.5), 'cm'),
+              guides = "collect")
+```
+
+There is a stark importance in the impact of a team's goal differential on their playoff status [see Figure \@ref(fig:piecharts)]. Teams with a goal differential of less than $-10$ are essentially guaranteed to miss the playoffs. Teams with a goal differential between -$10$ and $+20$ make the playoffs about $2/3$ of the time. Finally we are able to see that teams with a goal differential greater than $+20$ are essentially guaranteed to clinch a playoff spot.
+
+## How much better are Playoff Teams?
+
+```{r pointsBoxplot, fig.height=4.6, fig.cap="Boxplot of Team Points by Clinch Status"}
+ggplot(data = end_season,
+       aes(x = clinchIndicator, y = end_season_points, 
+           fill = clinchIndicator)
+       ) +
+  geom_boxplot() +
+  labs(title = "Boxplot of Points by Clinch Status",
+       x = "Clinch Status", y = "Points (end of season)") +
+  scale_fill_discrete(name = "Clinch Status") +
+  theme(title = element_text(size = 14, face = "bold"),
+        axis.text = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.text = element_text(size = 14))
+```
+
+\newpage
+
+Team points will increase as one looks left to right as the President's Trophy is the highest honor, since it means that team led the entire NHL in points at the end of the season [@presidents]. Most interesting is observing the outliers who made the playoffs, and the range of those who were eliminated from the playoffs. Teams who make the playoffs are usually in at least the $100$ points area. However it is observed that some teams score upwards of $100$ points and still get eliminated from the playoffs [See Figure \@ref(fig:pointsBoxplot)].
+
+```{r outliersTable}
+outlier_df <-
+  end_season %>% 
+  group_by(clinchIndicator) %>% 
+  arrange(desc(end_season_points)) %>% 
+  ungroup() %>% 
+  filter(clinchIndicator %in% c("Made Playoffs", "Won Division")) %>% 
+  rename(`Clinch Status` = clinchIndicator,
+         Team = team_name,
+         Season = seasonId,
+         Points = end_season_points) %>% 
+  dplyr::slice(c(2, 314, 335, 336)) %>% 
+  select(`Clinch Status`, Team, Season, Points)
+
+outlier_df %>% 
+  kbl(format = "latex", booktabs = TRUE,
+      caption = "Table of Playoff Outliers") %>% 
+  kable_styling(latex_options = c("HOLD_position", "striped"),
+                stripe_color = "#e6e6fa", font_size = 11)
+```
+
+The visible outliers who made the playoffs are interesting cases [See Table \@ref(tab:outliersTable)]. The 2021-2022 Toronto Maple Leafs only Made the Playoffs because they were in the same division as the Florida Panthers who won the President's Trophy. Meanwhile the 1996-1997 Ottawa Senators and Montreal Canadiens benefited from playing in an exceptionally weak conference, which resulted in them making the playoffs. Finally, the 1998-1999 Carolina Hurricanes were the best team in the worst division in hockey and were able to come away as champions of the Southeast Division.
+
+## How has the NHL Dynamic Changed?
+
+```{r decadePoints, fig.cap="Boxplot of Points by Decade"}
+ggplot(data = end_season,
+       aes(x = decade, y = end_season_points, fill = decade)) +
+  geom_boxplot() +
+  labs(title = "Points by Decade", 
+       x = "Decade",
+       y = "Points (end of Season)") +
+  scale_fill_discrete(name = "Decade") +
+  theme(title = element_text(size = 14, face = "bold"),
+        axis.text = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.text = element_text(size = 14))
+```
+
+The reason the difference in decades interests me is because as the NHL has grown over the years there has become a movement towards higher overall point totals in the league. The boxplot confirms this idea as we can see since the 1990s there has been an overall increase in team's points at the end of the season [See Figure \@ref(fig:decadePoints)]. This likely has to do with the more even level of competition in the NHL. In modern standards players condition year-round, and higher levels of play are consistently expected compared to older eras [@playStyle].
+
+# The Model
+
+By defining a team's success by their points at the end of the season, I aim to create a predictive regression model which predicts team points at the end of season. It will utilize specific near-end season data variables to make the prediction of the end of season points.
+
+## Model Data
+
+Data was collected using the NHL API through Python [@nhlAPI]. I scraped team statistics and standings for regular season games from 1979-1980 through 2023-2024. There are two distinct sets of data, the data from NHL seasons through 65-70 games in the season (near-end season data). We then had complementary end season statistics for each season with the exception of 2022-2023.
+
+## Feature Engineering
+
+The near-end season data was the data used to train our predictive model. I made the decision to add two features to the near-end season data.
+
+The following variables were added:
+
+-   `end_season_points`: The team's points at the end of the season,
+    from the end of season data.
+-   `decade`: The decade in which the team's season took place.
+
+## Feature Selection
+
+Following the feature engineering process, we employ the Boruta feature
+selection algorithm to verify the importance of our predictive features.
+The Boruta algorithm utilizes a Random Forest method for confirming the
+importance of variables. The algorithm confirmed that all the variables
+were significant predictors of a team's points at the end of
+the season [See Table \@ref(tab:variables)].
+
+## Model Creation
+
+I constructed the models using `tidymodels` workflows [@tidymodels]. The step-by-step
+model creation process is as follows:
+
+1.  I utilized the near-end season data for seasons from 1995-1996 to
+    2022-2023 as the training data for the model.
+
+2.  To further ensure the best model possible, hyper parameter tuning
+    was utilized for all models except the linear regression model.
+    Tuning finds the ideal hyper parameters for the models based on the
+    training data.
+
+3.  In the pre-processing phase of the model recipe, the workflow checks
+    to ensure there are no variables with zero variance (all the same
+    values), add dummy variables for categorical variables which not
+    already encoded, and finally scale and center all numeric variables.
+    These choices minimize the variance caused by outliers in the
+    predictor variables.
+
+4.  I perform the hyper parameter tuning process by constructing a grid
+    of 1500 unique values (depending upon each model's specific
+    parameters) then re-fit the model for each set of parameters. Each
+    fitted model is cross-validated for performance, and at the end the
+    best model is chosen by the cross-validation model with the lowest
+    root mean square error (rmse).
+
+For the model selection process I tested out $6$ different models. These
+models included:
+
+-   Linear Regression
+-   K-Nearest Neighbors (KNN)
+-   Polynomial Support Vector Machine (SVM, `kernlab` [@kernlab])
+-   Random Forest (`ranger` [@ranger])
+-   Gradient Boosted Tree (`xboost` [@xgboost])
+-   Multi-layer Perceptron (`nnet`[@nnet])
+
+One final note is that once the models were tuned I was interested in
+observing if the outliers within the model were affecting the predictive
+performance. This is plausible since the training data set only
+consisted of $740$ observations. I decided to examine the models with
+the same hyper parameters, but compare their performance with and
+without outlier observations in the training data.
+
+# Results
+
+## Cross-Validation Metrics
+
+For choosing the best model I decided to focus on two specific
+regression variable metrics, the Root Mean Square Error (RMSE) and the
+R-squared Coefficient of Determination. For RMSE a lower value indicates
+a better performing model. A higher R-squared value indicates a better
+model fit when comparing models with the same variables. While reading
+the following table it is important to keep in mind that the SVM model
+was unable to make a prediction for the 2023-2024 San Jose Sharks. I'm
+not quite sure why this happened as all other models did not encounter a
+problem.
+
+### Models by RMSE
+
+```{r cvRMSE, fig.height=3}
+cv_outliers <- read_csv("../data/model/end_season_points/model_metrics.csv")
+cv_outliers <- 
+  cv_outliers %>% 
+  select(-.estimator, -n) %>% 
+  rename(Metric = .metric,
+         Mean = mean,
+         `Std. Error` = std_err,
+         Model = model) %>% 
+  relocate(Model, .before = Metric)
+cv <- read_csv("../data/model/end_season_points/model_metrics_no_outliers.csv")
+cv <- 
+  cv %>% 
+  select(-.estimator, -n) %>% 
+  rename(Metric = .metric,
+         Mean = mean,
+         `Std. Error` = std_err,
+         Model = model) %>% 
+  mutate(Model = str_remove_all(Model, "\\(no outliers\\)")) %>% 
+  relocate(Model, .before = Metric)
+
+outliers_rmse <-
+  cv_outliers %>% 
+  filter(Metric == "rmse") %>% 
+  mutate(Metric = "RMSE") %>% 
+  arrange(Mean)
+
+cv_rmse <- 
+  cv %>% 
+  filter(Metric == "rmse") %>% 
+  mutate(Metric = "RMSE") %>% 
+  arrange(Mean)
+
+cbind(outliers_rmse, cv_rmse) %>% 
+  kbl(format = "latex", booktabs = TRUE, digits = 3,
+      caption = "Table of Models by RMSE") %>% 
+  kable_styling(font_size = 11, latex_options = c("striped", "HOLD_position"),
+                stripe_color = "#e6e6fa", 
+                full_width = FALSE) %>% 
+  add_header_above(c("with Outliers" = 4, 
+                     "no Outliers" = 4))
+```
+
+We are able to see that for both the model with outliers
+and the model without outliers the SVM model and Boosted Tree model
+performed the best [See Table \@ref(tab:cvRMSE)]. It's also clear to see that the worst performing
+model in both cases was the K-Nearest Neighbors model, so that is
+excluded from selection. I further excluded the SVM model from my
+selection due to the `NaN` model generated for the San Jose Sharks
+prediction. The MLP and Random Forest models performed well but the MLP
+performed marginally better with it's rather low standard error. In
+terms of the RMSE metric, the Boosted Tree model was the best performing
+model.
+
+### Models by R-Squared
+
+```{r cvRsq, fig.height=3}
+outliers_rsq <-
+  cv_outliers %>% 
+  filter(Metric == "rsq") %>% 
+  mutate(Metric = "R-squared") %>% 
+  arrange(desc(Mean))
+
+cv_rsq <- 
+  cv %>% 
+  filter(Metric == "rsq") %>% 
+  mutate(Metric = "R-squared") %>%
+  arrange(desc(Mean))
+
+cbind(outliers_rsq, cv_rsq) %>% 
+  kbl(format = "latex", booktabs = TRUE, digits = 3,
+      caption = "Table of Models by R-Squared") %>% 
+  kable_styling(font_size = 11, latex_options = c("striped", "HOLD_position"),
+                stripe_color = "#e6e6fa", 
+                full_width = FALSE) %>% 
+  add_header_above(c("with Outliers" = 4, 
+                     "no Outliers" = 4))
+```
+
+When evaluating the R-squared metrics of the models with outliers and no
+outliers, the results are exactly the same as with the RMSE. SVM and
+Boosted Tree were the two best models followed by the MLP then the
+Random Forest model [See Table \@ref(tab:cvRsq)]. The K-Nearest Neighbors model was again the worst
+performing model. The SVM again was excluded due to the `NaN`
+prediction. From R-squared, again the best performing model was the
+Boosted Tree model. The Boosted Tree model created using the `xgboost`
+package was the best performing model overall. This was the model whose
+predictions were utilized for the final results. Furthermore I
+specifically used the model trained on the data without outliers. The
+models without outliers had a noticeable performance improvement.
+
+## Model Parameters
+
+```{=tex}
+\definecolor{Mypurple}{HTML}{E6E6FA}
+
+\begin{table}[ht]
+  \centering
+  \normalsize
+  \rowcolors{2}{white}{Mypurple}
+  \begin{tabular}{ccc}
+    \toprule
+    Parameter Description & R Documentation & Value \\
+    \midrule
+    Number of Randomly Selected Predictors & mtry & 11 \\
+    Number of trees & trees & 127 \\
+    Minimal Node Size & min$\_$n & 6 \\
+    Tree Depth & tree$\_$depth & 6 \\
+    Learning Rate & learn$\_$rate & $\approx$0.0434 \\
+    Minimum Loss Reduction & loss$\_$reduction & $\approx$0.1236 \\
+    Sample Size & sample$\_$size & 1 \\
+    Number of Iterations Before Stopping & stop$\_$iter & 5 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Boosted Tree Tuning Parameters}
+  \label{tab:example2}
+\end{table}
+```
+
+The model parameters were chosen using tidymodels tuning to hyper-parameter tune for all the parameters of the model with the exceptions of `sample_size` and `stop_iter` which I arbitrarily chose for the model [See Table \@ref(tab:example2)]. I utilized a 1500 unique row random tuning grid to train 1500 boosted tree models. Additionally, cross-validation was performed on each model after it was fit using its random hyper-parameters. At the end of the process, I collected metrics and decided the best fit based upon the model with the lowest RMSE. That best fit model is represented by the hyper-parameters above
+
+## Model Predictions
+
+```{r predTable}
+playoff_table <- 
+  preds_w_index %>% 
+  mutate(clinchIndicator = factor(clinchIndicator, 
+                                  levels = c("e", "x", "y", "z", "p"),
+                                  labels = c("Eliminated", "Made Playoffs",
+                                             "Won Division", "Won Conference",
+                                             "President's Trophy"))) %>% 
+  arrange(desc(end_season_points)) %>% 
+  select(clinchIndicator, team_name, seasonId, end_season_points) %>% 
+  rename(`Clinch Status` = clinchIndicator,
+         Team = team_name,
+         Season = seasonId,
+         Points = end_season_points) %>% 
+  filter(!(`Clinch Status` %in% c("Eliminated"))) %>% 
+  select(-Season)
+
+others <-
+  preds_w_index %>% 
+  mutate(clinchIndicator = factor(clinchIndicator, 
+                                  levels = c("e", "x", "y", "z", "p"),
+                                  labels = c("Eliminated", "Made Playoffs",
+                                             "Won Division", "Won Conference",
+                                             "President's Trophy"))) %>% 
+  arrange(desc(end_season_points)) %>% 
+  select(clinchIndicator, team_name, seasonId, end_season_points) %>% 
+  rename(`Clinch Status` = clinchIndicator,
+         Team = team_name,
+         Season = seasonId,
+         Points = end_season_points) %>% 
+  filter(`Clinch Status` %in% c("Eliminated")) %>% 
+  select(-Season)
+
+cbind(playoff_table, others) %>% 
+  kbl(format = "latex", booktabs = TRUE,
+      caption = "Table of Final Standings Predictions") %>% 
+  kable_styling(latex_options = c("striped", "HOLD_position", "scale_down"),
+                stripe_color = "#e6e6fa", font_size = 10) %>% 
+  add_header_above(c("Playoff Teams" = 3,
+                   "Non-Playoff Teams" = 3))
+```
+
+My predictions put 93 points as the cutoff for playoff
+contention this year [See Table \@ref(tab:predTable)]. As we can see there are several teams on the verge
+of this mark. The separating factors between the teams fighting for playoff spots is only 2-4 points, which is 1-2 wins.
+
+```{r rankTable, eval=FALSE, include=FALSE}
+preds_w_index <- 
+  preds_w_index %>% 
+  arrange(desc(end_season_points))
+mid_rank <- rank(rev(preds_w_index$points), ties.method = "first")
+end_rank <- rank(rank(rev(preds_w_index$end_season_points), 
+                      ties.method = "first"))
+rank_change <- end_rank - mid_rank
+
+preds_w_index <-
+  preds_w_index %>% 
+  mutate(Movement = as.character(rev(rank_change))) %>% 
+  mutate(Movement = factor(Movement,
+                           levels = c("-3", "-2", "-1", "0", "1", "2", "3")
+                           )
+         )
+
+
+rank_tbl_playoffs <- 
+  preds_w_index %>%
+  filter(!(clinchIndicator %in% c("e"))) %>% 
+  select(team_name, Movement) %>% 
+  rename(Team = team_name)
+
+rank_tbl_non <-
+  preds_w_index %>%
+  filter(clinchIndicator %in% c("e")) %>% 
+  select(team_name, Movement) %>% 
+  rename(Team = team_name)
+
+cbind(rank_tbl_playoffs, rank_tbl_non) %>%
+  kbl(format = "latex", booktabs = TRUE,
+      caption = "Table of Predicted Standings Movement") %>%
+  kable_styling(latex_options = c("striped", "HOLD_position", "scale_down"),
+                stripe_color = "#e6e6fa", font_size = 10) %>%
+  add_header_above(c("Playoff Teams" = 2,
+                     "Non-Playoff Teams" = 2))
+```
+
+<!-- Table 7 illustrates the standings movement between the near-end season -->
+<!-- data, and the predicted end season points data. A negative value -->
+<!-- indicates the predictions suggests a decline in the standings, a -->
+<!-- positive value indicates the prediction suggests an improvement in -->
+<!-- standings. Most of the Playoff teams didn't experience any significant -->
+<!-- movement. One to discuss is the Nashville Predators who dropped 3 spots -->
+<!-- in the standings and nearly missed out on a playoff spot, which likely -->
+<!-- is contributed to their rather mediocre goal differential of $+12$. It -->
+<!-- is a surprise that the model's prediction that the Sharks would improve -->
+<!-- above the Blackhawks despite the Sharks being worse in nearly every -->
+<!-- metric. -->
+
+## Variable Importance
+
+```{r vip, fig.cap="Variable Importance Plot"}
+source("end_season_model.R")
+vip_plot +
+  theme(title = element_text(face = "bold", size = 12),
+        axis.title = element_text(face = "bold", size = 12),
+        axis.text = element_text(size = 12))
+```
+
+For our predictive model the most important variables were points at the
+mid-point `points`, `goalDifferential`, and a team's total losses
+`losses` [See Figure \@ref(fig:vip)]. The goal differential is the best descriptive variable for
+evaluating a team's overall success, and predicting a team's success in
+the future.
+
+# Conclusion
+
+## Goal Differential's Impact
+
+There is abundant information provided above to suggest that goal
+differential is the best predictive statistic we can use to evaluate a
+team's success. To put it simply teams with highly positive goal
+differentials win a lot and lose a little, the opposite holds true as
+well. The important part of goal differential is understanding it scales
+the game down a level, and does not let a team hide its flaws.
+
+## Playoff Team's Performance
+
+During the regular season team's which miss the playoffs tend to have
+poor goal differentials, and struggle to produce at a high level. The
+data analysis has supported that the team's who barely miss the playoffs
+are within 2-4 points of a playoff spot. This is the difference of 2
+wins in a season, and it helps with understanding how important every
+game is throughout the NHL season.
+
+## Model Results
+
+Our model predicted `end_season_points` with an $\text{RMSE} = 3.91$
+which I consider very high performance based upon the available data.
+There was less than 1000 observations of training data, and yet it's
+still able to make a rather effective model. There is room for
+improvement with the model, but I think the model is at a great point.
+It keeps the model simple, and looks to simple team counting stats. The
+advanced stats are not always the answer, and hockey is still not the
+most data rich sport.
+
+The meaningful outcome of this model is there's more to determine a
+team's performance than `points` and `losses`. I was able to find that
+there are a few important variables for predicting a team's success
+including `goalDifferential`, `shootoutLosses`, and `decade`.
+
+## Possible Improvements
+
+After coming up with the idea for this project I decided I wanted to keep the variables as simple as possible, and restricted to base statistics. It would likely be beneficial to have additional information such as line strength, and performance when at an advantage or disadvantage. However I had faith this model would perform to a high level, and my expectations are exceeded at this point so I am satisfied with the results. 
+
+## Looking Ahead
+
+I hope to compare the results of my models to the true results at the end of the NHL season. Additionally, once the end of season comes I plan to develop a model which aims to predict the Stanley Cup champion based upon teams data at the end of the regular season. Overall the model will look to predict playoff performance among all NHL teams who make the playoffs. This will have to wait about a month as the NHL continue to play regular season games.
+
+\newpage
+
+# Bibliography
